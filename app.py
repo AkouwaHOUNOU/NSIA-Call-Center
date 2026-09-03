@@ -387,16 +387,29 @@ def authentifier_utilisateur():
     application = _secret_section("application")
     auth_required = bool(application.get("auth_required", True))
     if not auth_required:
-        return {"name": "Démonstration", "email": "demo@localhost"}
+        access_code = str(application.get("access_code", "")).strip()
+        if access_code:
+            st.title("NSIA Call Center")
+            st.info("Accès restreint. Entrez le code d'accès pour continuer.")
+            code_input = st.text_input("Code d'accès", type="password")
+            if st.button("Entrer"):
+                if code_input != access_code:
+                    st.error("Code incorrect.")
+                    st.stop()
+                st.session_state["access_granted"] = True
+                st.rerun()
+            if not st.session_state.get("access_granted"):
+                st.stop()
+        return {"name": "Utilisateur local", "email": "local@localhost"}
 
     try:
         is_logged_in = bool(st.user.is_logged_in)
     except Exception:
-        st.warning(
+        st.error(
             "L'authentification Microsoft n'est pas encore configurée. "
-            "Passage en mode démo local."
+            "Renseignez la section [auth] des secrets Streamlit."
         )
-        return {"name": "Démonstration", "email": "demo@localhost"}
+        st.stop()
 
     if not is_logged_in:
         st.title("NSIA Call Center")
