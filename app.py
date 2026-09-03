@@ -387,16 +387,16 @@ def authentifier_utilisateur():
     application = _secret_section("application")
     auth_required = bool(application.get("auth_required", True))
     if not auth_required:
-        return {"name": "Développement local", "email": "local@localhost"}
+        return {"name": "Démonstration", "email": "demo@localhost"}
 
     try:
         is_logged_in = bool(st.user.is_logged_in)
     except Exception:
-        st.error(
+        st.warning(
             "L'authentification Microsoft n'est pas encore configurée. "
-            "Renseignez la section [auth] des secrets Streamlit."
+            "Passage en mode démo local."
         )
-        st.stop()
+        return {"name": "Démonstration", "email": "demo@localhost"}
 
     if not is_logged_in:
         st.title("NSIA Call Center")
