@@ -2,7 +2,7 @@
 """
 NSIA Assurances Togo - Call Center Dashboard
 Application Streamlit pour la saisie, le suivi et l'analyse des appels.
-Base collaborative: listes SharePoint via Microsoft Graph.
+Base collaborative: base PostgreSQL Supabase.
 """
 
 import streamlit as st
@@ -10,15 +10,16 @@ import pandas as pd
 import plotly.express as px
 from datetime import datetime, date
 import hashlib
+import hmac
 import io
 import json
 import time
 
 from points_de_vente import POINTS_DE_VENTE as DEFAULT_POINTS_DE_VENTE
-from sharepoint_service import (
-    SharePointConfigurationError,
-    SharePointError,
-    SharePointService,
+from database_service import (
+    DatabaseConfigurationError,
+    DatabaseError,
+    DatabaseService,
     values_for_type,
 )
 
@@ -247,7 +248,7 @@ hr {{
     unsafe_allow_html=True,
 )
 
-DATA_SOURCE_LABEL = "SharePoint — APPELS_CALL_CENTER"
+DATA_SOURCE_LABEL = "Base en ligne Supabase — appels_call_center"
 
 # ============================================================================
 # DONNÉES NSIA
@@ -341,7 +342,7 @@ DEFAULT_FEEDBACK = [
 ]
 
 # ============================================================================
-# CONNEXION, AUTHENTIFICATION ET DONNÉES SHAREPOINT
+# CODE D'ACCÈS ET DONNÉES SUPABASE
 # ============================================================================
 
 
@@ -374,86 +375,83 @@ def _secret_section(name):
         return {}
 
 
-def _user_claim(name):
-    try:
-        value = st.user.get(name)
-    except (AttributeError, TypeError):
-        value = getattr(st.user, name, "")
-    return str(value or "").strip()
-
-
 def authentifier_utilisateur():
-    """Bloque l'application tant qu'un compte Microsoft NSIA n'est pas connecté."""
+    """Protège l'application par un code commun stocké dans les secrets."""
     application = _secret_section("application")
-    auth_required = bool(application.get("auth_required", True))
-    if not auth_required:
-        access_code = str(application.get("access_code", "")).strip()
-        if access_code:
-            st.title("NSIA Call Center")
-            st.info("Accès restreint. Entrez le code d'accès pour continuer.")
-            code_input = st.text_input("Code d'accès", type="password")
-            if st.button("Entrer"):
-                if code_input != access_code:
-                    st.error("Code incorrect.")
-                    st.stop()
-                st.session_state["access_granted"] = True
-                st.rerun()
-            if not st.session_state.get("access_granted"):
-                st.stop()
-        return {"name": "Utilisateur local", "email": "local@localhost"}
+    access_required = bool(application.get("access_required", True))
+    if not access_required:
+        return {"name": "Développement local", "email": "local@localhost"}
 
-    try:
-        is_logged_in = bool(st.user.is_logged_in)
-    except Exception:
+    access_code = str(application.get("access_code", "")).strip()
+    if not access_code:
         st.error(
-            "L'authentification Microsoft n'est pas encore configurée. "
-            "Renseignez la section [auth] des secrets Streamlit."
+            "Le code d'accès n'est pas configuré. Renseignez "
+            "application.access_code dans les secrets Streamlit."
+        )
+        st.stop()
+    if len(access_code) < 12:
+        st.error(
+            "Le code d'accès doit contenir au moins 12 caractères. "
+            "Choisissez une phrase secrète difficile à deviner."
         )
         st.stop()
 
-    if not is_logged_in:
+    if st.session_state.get("access_granted"):
+        return {"name": "Utilisateur autorisé", "email": ""}
+
+    now = time.time()
+    locked_until = float(st.session_state.get("access_locked_until", 0))
+    if locked_until > now:
+        remaining = max(int(locked_until - now), 1)
         st.title("NSIA Call Center")
-        st.info("Connectez-vous avec votre compte professionnel NSIA pour continuer.")
-        if st.button("Se connecter avec Microsoft", type="primary"):
-            st.login()
+        st.error(f"Trop de tentatives. Réessayez dans {remaining} secondes.")
         st.stop()
 
-    email = _user_claim("email") or _user_claim("preferred_username")
-    name = _user_claim("name") or email or "Utilisateur NSIA"
-    allowed_domain = str(application.get("allowed_email_domain", "")).strip().lower()
-    if allowed_domain and not email.lower().endswith("@" + allowed_domain.lstrip("@")):
-        st.error("Ce compte n'appartient pas au domaine professionnel autorisé.")
-        if st.button("Se déconnecter"):
-            st.logout()
-        st.stop()
-    return {"name": name, "email": email}
+    st.title("NSIA Call Center")
+    st.info("Saisissez le code d'accès communiqué par votre responsable.")
+    with st.form("access_form", clear_on_submit=True):
+        submitted_code = st.text_input("Code d'accès", type="password")
+        submitted = st.form_submit_button(
+            "Accéder à l'application", type="primary", use_container_width=True
+        )
+    if submitted:
+        if hmac.compare_digest(submitted_code, access_code):
+            st.session_state["access_granted"] = True
+            st.session_state["access_attempts"] = 0
+            st.rerun()
+        attempts = int(st.session_state.get("access_attempts", 0)) + 1
+        st.session_state["access_attempts"] = attempts
+        if attempts >= 5:
+            st.session_state["access_locked_until"] = time.time() + 300
+            st.session_state["access_attempts"] = 0
+            st.error("Trop de tentatives. L'accès est bloqué pendant 5 minutes.")
+        else:
+            st.error("Code incorrect.")
+    st.stop()
 
 
 @st.cache_resource(show_spinner=False)
-def get_sharepoint_service():
-    configuration = _secret_section("sharepoint")
-    tenant = str(configuration.get("tenant_id", "")).strip()
-    if not tenant or tenant.upper() == "TENANT_ID":
-        raise SharePointConfigurationError("Tenant SharePoint non configuré.")
-    return SharePointService.from_mapping(configuration)
+def get_database_service():
+    configuration = _secret_section("database")
+    return DatabaseService.from_mapping(configuration)
 
 
 @st.cache_data(ttl=30, show_spinner=False)
 def _charger_appels_cache():
-    return get_sharepoint_service().list_calls()
+    return get_database_service().list_calls()
 
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _charger_references_cache(include_inactive=False):
-    return get_sharepoint_service().list_references(include_inactive=include_inactive)
+    return get_database_service().list_references(include_inactive=include_inactive)
 
 
-def invalider_cache_sharepoint():
+def invalider_cache_donnees():
     _charger_appels_cache.clear()
     _charger_references_cache.clear()
 
 
-def lire_appels_sharepoint():
+def lire_appels_base():
     columns = [
         "Date", "TO", "Nom du Client", "telephone", "Immatriculation",
         "Police", "Campagne", "Reception", "Prise d'appel",
@@ -472,52 +470,9 @@ def lire_appels_sharepoint():
             df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
         df["CA"] = pd.to_numeric(df["CA"], errors="coerce").fillna(0)
         return df[columns]
-    except (SharePointConfigurationError, SharePointError):
-        return _jeu_donnees_demo_appels()
-
-
-def _jeu_donnees_demo_appels():
-    columns = [
-        "Date", "TO", "Nom du Client", "telephone", "Immatriculation",
-        "Police", "Campagne", "Reception", "Prise d'appel",
-        "Produit existant", "Produit proposé", "Feedback", "CA",
-        "Point de vente", "Heure_appel", "Statut", "Motif_non_reponse",
-        "Commentaire", "Satisfaction", "Recommendation", "Produit souhaite",
-        "_item_id", "_etag",
-    ]
-    st.warning(
-        "Mode démo activé : les données SharePoint ne sont pas accessibles. "
-        "Configurez les secrets pour une vraie connexion."
-    )
-    base = [
-        {
-            "Date": date(2026, 9, 1), "TO": "Audrey", "Nom du Client": "KOMLAN",
-            "telephone": "90 00 00 01", "Immatriculation": "TG 1234 AB",
-            "Police": "POL-2024-001", "Campagne": "ONBOARDING", "Reception": "REN",
-            "Prise d'appel": "Oui", "Produit existant": "AUTOMOBILE",
-            "Produit proposé": "RESPONSABILITE CIVILE", "Feedback": "Rappel apres",
-            "CA": 14000, "Point de vente": "AGENCE KARA", "Heure_appel": "14:42",
-            "Statut": "Repondu", "Motif_non_reponse": None, "Commentaire": "Démo",
-            "Satisfaction": "Satisfait", "Recommendation": "8", "Produit souhaite": None,
-            "_item_id": "DEMO-1", "_etag": None,
-        },
-        {
-            "Date": date(2026, 9, 2), "TO": "Sylvanus", "Nom du Client": "AKAKPO",
-            "telephone": "91 00 00 02", "Immatriculation": "TG 5678 CD",
-            "Police": "POL-2025-042", "Campagne": "RECUPERATION", "Reception": "AFN",
-            "Prise d'appel": "Non", "Produit existant": "DOMMAGES CORPORELS",
-            "Produit proposé": "FACULTES", "Feedback": "Injoignable",
-            "CA": 14555, "Point de vente": "BUREAU DIRECT SIEGE", "Heure_appel": "15:10",
-            "Statut": "Non repondu - Pas de reponse", "Motif_non_reponse": "Pas de reponse",
-            "Commentaire": "Démo", "Satisfaction": None, "Recommendation": None,
-            "Produit souhaite": None, "_item_id": "DEMO-2", "_etag": None,
-        },
-    ]
-    df = pd.DataFrame(base, columns=columns)
-    for column in columns:
-        if column not in df.columns:
-            df[column] = None
-    return df[columns]
+    except (DatabaseConfigurationError, DatabaseError) as exc:
+        st.error(f"Connexion à la base impossible : {exc}")
+        return pd.DataFrame(columns=columns)
 
 
 def _references_par_defaut():
@@ -547,25 +502,24 @@ def lire_references():
         "POINT_DE_VENTE": "points_de_vente",
     }
     try:
-        cfg = _secret_section("sharepoint")
-        tenant = str(cfg.get("tenant_id", "")).strip()
-        if tenant and tenant.upper() != "TENANT_ID":
-            rows = _charger_references_cache(False)
-            refs["_reference_rows"] = rows
-            for reference_type, target in type_map.items():
-                values = values_for_type(rows, reference_type)
-                if values:
-                    refs[target] = values
+        rows = _charger_references_cache(False)
+        refs["_reference_rows"] = rows
+        for reference_type, target in type_map.items():
+            values = values_for_type(rows, reference_type)
+            if values:
+                refs[target] = values
         return refs
-    except (SharePointConfigurationError, SharePointError):
+    except (DatabaseConfigurationError, DatabaseError) as exc:
+        st.warning(f"Références de la base indisponibles : {exc}")
         return refs
+
 
 def _empreinte_appel(nouvel_appel):
     payload = json.dumps(nouvel_appel, sort_keys=True, default=str, ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def sauvegarder_appel_sharepoint(nouvel_appel):
+def sauvegarder_appel(nouvel_appel):
     """Enregistre, puis confirme avant d'afficher un succès."""
     fingerprint = _empreinte_appel(nouvel_appel)
     last_fingerprint = st.session_state.get("last_call_fingerprint")
@@ -575,59 +529,59 @@ def sauvegarder_appel_sharepoint(nouvel_appel):
         return False
 
     try:
-        created = get_sharepoint_service().create_call(nouvel_appel)
+        created = get_database_service().create_call(nouvel_appel)
         if not created.get("id"):
-            raise SharePointError("SharePoint n'a pas confirmé l'identifiant de l'appel.")
+            raise DatabaseError("La base n'a pas confirmé l'identifiant de l'appel.")
         st.session_state["last_call_fingerprint"] = fingerprint
         st.session_state["last_call_saved_at"] = time.time()
-        invalider_cache_sharepoint()
+        invalider_cache_donnees()
         return True
-    except (SharePointConfigurationError, SharePointError) as exc:
+    except (DatabaseConfigurationError, DatabaseError) as exc:
         st.error(f"L'appel n'a pas été enregistré : {exc}")
         st.info("Vos informations restent dans le formulaire. Réessayez après vérification.")
         return False
 
 
-def ajouter_to_sharepoint(nouveau_to):
+def ajouter_to(nouveau_to):
     try:
-        result = get_sharepoint_service().add_reference("TO", nouveau_to)
-        invalider_cache_sharepoint()
+        result = get_database_service().add_reference("TO", nouveau_to)
+        invalider_cache_donnees()
         return result
-    except (SharePointConfigurationError, SharePointError) as exc:
+    except (DatabaseConfigurationError, DatabaseError) as exc:
         st.error(f"Ajout impossible : {exc}")
         return False
 
 
-def desactiver_to_sharepoint(item_id, etag=None):
+def desactiver_to(item_id, etag=None):
     try:
-        get_sharepoint_service().deactivate_reference(item_id, etag=etag)
-        invalider_cache_sharepoint()
+        get_database_service().deactivate_reference(item_id, etag=etag)
+        invalider_cache_donnees()
         return True
-    except (SharePointConfigurationError, SharePointError) as exc:
+    except (DatabaseConfigurationError, DatabaseError) as exc:
         st.error(f"Désactivation impossible : {exc}")
         return False
 
 
-def supprimer_appel_sharepoint(item_id, etag=None):
+def supprimer_appel(item_id, etag=None):
     if not item_id:
         return False
     try:
-        get_sharepoint_service().delete_call(str(item_id), etag=etag)
-        invalider_cache_sharepoint()
+        get_database_service().delete_call(str(item_id), etag=etag)
+        invalider_cache_donnees()
         return True
-    except (SharePointConfigurationError, SharePointError) as exc:
+    except (DatabaseConfigurationError, DatabaseError) as exc:
         st.error(f"Suppression impossible : {exc}")
         return False
 
 
-def modifier_appel_sharepoint(item_id, valeurs, etag=None):
+def modifier_appel(item_id, valeurs, etag=None):
     if not item_id:
         return False
     try:
-        get_sharepoint_service().update_call(str(item_id), valeurs, etag=etag)
-        invalider_cache_sharepoint()
+        get_database_service().update_call(str(item_id), valeurs, etag=etag)
+        invalider_cache_donnees()
         return True
-    except (SharePointConfigurationError, SharePointError) as exc:
+    except (DatabaseConfigurationError, DatabaseError) as exc:
         st.error(f"Modification impossible : {exc}")
         return False
 
@@ -804,7 +758,7 @@ def page_saisie(refs):
                     "Recommendation": recommendation or None,
                 }
 
-                if sauvegarder_appel_sharepoint(nouvel_appel):
+                if sauvegarder_appel(nouvel_appel):
                     st.success(f"Appel enregistre pour {nom_affiche} !")
                     st.balloons()
                     st.session_state["campagne_sel"] = None
@@ -1214,10 +1168,10 @@ def _formulaire_modification_appel(selected_row, refs):
                     "Commentaire": edit_comment.strip() or None,
                     "CA": edit_ca,
                 }
-                if modifier_appel_sharepoint(
+                if modifier_appel(
                     item_id, changes, selected_row.get("_etag")
                 ):
-                    st.success("L'appel a été modifié dans SharePoint.")
+                    st.success("L'appel a été modifié dans la base.")
                     st.rerun()
 
 
@@ -1380,13 +1334,13 @@ def page_historique(df, refs):
                     else:
                         success_count = 0
                         for item_id, etag in items:
-                            if supprimer_appel_sharepoint(item_id, etag):
+                            if supprimer_appel(item_id, etag):
                                 success_count += 1
                         if success_count:
                             st.success(f"{success_count} ligne(s) supprimee(s).")
                             st.rerun()
                         else:
-                            st.error("Aucune suppression n'a été confirmée par SharePoint.")
+                            st.error("Aucune suppression n'a été confirmée par la base.")
                 except Exception:
                     st.error(
                         "Une erreur inattendue a empêché la suppression. "
@@ -1462,7 +1416,7 @@ def page_operateurs(refs):
 
     st.markdown(
         "Ajoutez ou désactivez des téléconseillers. Les modifications sont "
-        "enregistrées immédiatement dans `REFERENCES_CALL_CENTER`."
+        "enregistrées immédiatement dans la base en ligne."
     )
 
     st.subheader("Operateurs existants")
@@ -1489,10 +1443,10 @@ def page_operateurs(refs):
                     help=(
                         None
                         if reference_row is not None
-                        else "Cette valeur par défaut doit d'abord être créée dans SharePoint."
+                        else "Cette valeur par défaut doit d'abord être créée dans la base."
                     ),
                 ):
-                    result = desactiver_to_sharepoint(
+                    result = desactiver_to(
                         reference_row.get("_item_id"), reference_row.get("_etag")
                     )
                     if result:
@@ -1512,7 +1466,7 @@ def page_operateurs(refs):
             if not nouveau_to or not str(nouveau_to).strip():
                 st.error("Veuillez saisir un nom d'operateur.")
             else:
-                result = ajouter_to_sharepoint(nouveau_to)
+                result = ajouter_to(nouveau_to)
                 if result in {"ajoute", "reactive"}:
                     st.success(f"Operateur '{nouveau_to}' ajoute avec succes !")
                     st.rerun()
@@ -1533,11 +1487,11 @@ def page_parametres():
     st.markdown("### Source de données")
     st.code(DATA_SOURCE_LABEL, language="text")
 
-    if st.button("Tester la connexion SharePoint", type="primary"):
+    if st.button("Tester la connexion à la base", type="primary"):
         try:
-            get_sharepoint_service().healthcheck()
-            st.success("Connexion au site et aux deux listes confirmée.")
-        except (SharePointConfigurationError, SharePointError) as exc:
+            get_database_service().healthcheck()
+            st.success("Connexion aux deux tables Supabase confirmée.")
+        except (DatabaseConfigurationError, DatabaseError) as exc:
             st.error(f"Connexion non disponible : {exc}")
 
     st.markdown("### Palette NSIA")
@@ -1577,14 +1531,15 @@ def main():
 
     st.sidebar.markdown("---")
     st.sidebar.caption(
-        f"Source : `SharePoint`\nDernière actualisation : "
+        f"Source : `Base en ligne`\nDernière actualisation : "
         f"{datetime.now().strftime('%d/%m/%Y %H:%M')}"
     )
-    if _secret_section("application").get("auth_required", True):
-        if st.sidebar.button("Se déconnecter", use_container_width=True):
-            st.logout()
+    if _secret_section("application").get("access_required", True):
+        if st.sidebar.button("Verrouiller l'application", use_container_width=True):
+            st.session_state["access_granted"] = False
+            st.rerun()
 
-    df = lire_appels_sharepoint()
+    df = lire_appels_base()
     refs = lire_references()
 
     if page == "Saisie d'appel":
