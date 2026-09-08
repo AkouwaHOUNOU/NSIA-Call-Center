@@ -1,0 +1,31 @@
+# Secrets et identifiants
+.streamlit/secrets.toml
+.env
+.env.*
+!.env.example
+
+# Données confidentielles — ne jamais publier
+*.xls
+*.xlsx
+*.xlsm
+*.xlsb
+*.csv
+*.tsv
+*.parquet
+*.jsonl
+
+# Python / Streamlit
+__pycache__/
+*.py[cod]
+*.bak
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+.streamlit/cache/
+
+# Éditeurs et système
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
