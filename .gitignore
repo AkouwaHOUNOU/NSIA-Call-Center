@@ -29,3 +29,18 @@ venv/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Archives et documents sensibles
+*.zip
+*.7z
+*.rar
+*.docx
+*.doc
+*.png
+*.jpg
+*.jpeg
+
+# Fichiers temporaires et logs
+*.log
+*.tmp
+*~
